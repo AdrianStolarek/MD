@@ -1,0 +1,82 @@
+name: ML Pipeline CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'model/**'
+      - 'pipeline/**'
+      - 'deployment/**'
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: europe-west4
+  GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+  SERVICE_ACCOUNT: ${{ secrets.GCP_SA_EMAIL }}
+  ARTIFACT_REGISTRY: ${{ secrets.GCP_ARTIFACT_REGISTRY }}
+  MODEL_NAME: pytorch-model-${{ github.sha }}
+  ENDPOINT_NAME: pytorch-endpoint
+  DOCKER_IMAGE_NAME: pytorch-training
+  DOCKER_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r pipeline/requirements.txt
+        
+    - name: Google auth
+      id: auth
+      uses: google-github-actions/auth@v1
+      with:
+        workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ env.SERVICE_ACCOUNT }}
+        
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+      
+    - name: Configure docker for Artifact Registry
+      run: |
+        gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+    - name: Build and push Docker image
+      working-directory: ./model
+      run: |
+        docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_TAG }} .
+        docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_TAG }}
+        
+    - name: Compile Kubeflow pipeline
+      run: |
+        python pipeline/pipeline.py \
+          --output-path pipeline.json \
+          --image-uri ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_TAG }} \
+          --project ${{ env.PROJECT_ID }} \
+          --region ${{ env.REGION }} \
+          --gcs-bucket ${{ env.GCS_BUCKET }} \
+          --model-display-name ${{ env.MODEL_NAME }} \
+          --endpoint-name ${{ env.ENDPOINT_NAME }}
+          
+    - name: Run Vertex AI pipeline
+      run: |
+        python deployment/deploy.py \
+          --pipeline-path pipeline.json \
+          --project-id ${{ env.PROJECT_ID }} \
+          --region ${{ env.REGION }} \
+          --pipeline-root gs://${{ env.GCS_BUCKET }}/pipelines \
+          --pipeline-name pytorch-pipeline-${{ github.sha }} \
+          --service-account ${{ env.SERVICE_ACCOUNT }}

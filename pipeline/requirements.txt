@@ -1,0 +1,4 @@
+kfp==2.0.0
+google-cloud-aiplatform==1.36.0
+google-cloud-pipeline-components==2.3.0
+google-cloud-storage==2.9.0
